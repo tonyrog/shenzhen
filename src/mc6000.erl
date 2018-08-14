@@ -171,7 +171,7 @@ wr(S,x0,M) -> wire:write({M#mc.id,x0},S);
 wr(S,x1,M) -> wire:write({M#mc.id,x1},S);
 wr(S,x2,M) -> wire:write({M#mc.id,x2},S);
 wr(S,x3,M) -> wire:write({M#mc.id,x3},S);
-wr(S,_,M) -> M.
+wr(_S,_,M) -> M.
 
 digit(0,Value) -> abs(Value) rem 10;
 digit(1,Value) -> (abs(Value) div 10) rem 10;

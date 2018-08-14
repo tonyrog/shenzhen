@@ -82,9 +82,9 @@ is_valid_arg(XXXX,[l],Arg) ->
     end.
 
 %% parse text code into internal form 
-parse(Text) ->
-    Rows = string:tokens(Text),
-    Rows1 = [string:trim(R) || R <- Rows],
+parse(_Text) ->
+    %% Rows = string:tokens(Text),
+    %% Rows1 = [string:trim(R) || R <- Rows],
     ok.
 
     
