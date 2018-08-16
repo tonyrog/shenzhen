@@ -11,27 +11,31 @@
 -export([exec/1]).
 -export([instructions/0,registers/0, pins/0, ports/0, irange/0, lrange/0]).
 
+-define(EMPTY, {undefined,undefined}).
+-define(JMP1,  {0,{jmp,1}}).
+
 -record(mc,
 	{
 	 id,
-	 state = init :: init | run | hlt | slp,
+	 state = init :: init | run | slp,
 	 cycle = 0,
 	 acc = 0 :: -999..999,
 	 pc = 1 :: 1..9,
 	 cnd = 0,
-	 prog = {{0,hlt},{0,hlt},{0,hlt},
-		 {0,hlt},{0,hlt},{0,hlt},
-		 {0,hlt},{0,hlt},{0,hlt}}
+	 rd = ?EMPTY,  %% cached read
+	 prog = {?JMP1,?JMP1,?JMP1,
+		 ?JMP1,?JMP1,?JMP1,
+		 ?JMP1,?JMP1,?JMP1}
 	}).
 
 registers() -> [acc,null].
-pins() -> [p0, p1].
-ports() -> [x0, x1].
+pins() -> [{p,0}, {p,1}].
+ports() -> [{x,0}, {x,1}].
 irange() -> {-999,999}.
 lrange() -> {1,9}.
-    
+
 instructions() ->
-    [nop, hlt,
+    [nop,
      {mov,[r,i],[r]}, 
      {jmp,[l]}, 
      {slp,[r,i]},
@@ -52,7 +56,7 @@ new(Id,Is) when is_list(Is) ->
     case mcxxxx:compile(?MODULE,Is) of
 	{ok,Is1} -> 
 	    Len = length(Is1),
-	    Pad = lists:duplicate(9-Len, {0,hlt}),
+	    Pad = lists:duplicate(9-Len, ?JMP1),
 	    #mc { id=Id, prog = list_to_tuple(Is1++Pad) };
 	{error,Reason} ->
 	    error(Reason)
@@ -69,101 +73,161 @@ exec(_,Pc,Cnd,M) ->
 
 exec_(nop,Pc,Cnd,M) ->
     next(Pc+1,Cnd,M);
-exec_(hlt,Pc,Cnd,M) ->
-    M#mc { state=hlt, pc=Pc, cnd=Cnd };
 exec_({mov,Src,Dst},Pc,Cnd,M) ->
-    S = rd(Src,M),
-    M1 = wr(S,Dst,M),
-    next(Pc+1,Cnd,M1);
+    case rd(Src,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{S,M1} ->
+	    case wr(S,Dst,M1) of
+		block -> block(Pc,Cnd,M1);
+		M2 -> nextc(Pc+1,Cnd,M2)
+	    end
+    end;
 exec_({jmp,L},_Pc,Cnd,M) ->
     next(L,Cnd,M);
 exec_({slp,Arg},Pc,Cnd,M) ->
-    M1 = sleep(rd(Arg,M),M),
-    next(Pc+1,Cnd,M1);
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{S,M2} -> sleep(Pc,Cnd,M2,S)
+    end;
 exec_({slx,Arg},Pc,Cnd,M) ->
-    M1 = wait(Arg,M),
-    next(Pc+1,Cnd,M1);
+    case wire:wait({M#mc.id,Arg}) of
+	block -> block(Pc,Cnd,M);
+	ok -> next(Pc+1,Cnd,M)
+    end;
 exec_({add,Arg},Pc,Cnd,M) ->
-    next(Pc+1,Cnd,M#mc{acc=int(M#mc.acc + rd(Arg,M))});
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{S,M1} -> nextc(Pc+1,Cnd,M1#mc{acc=int(M1#mc.acc + S)})
+    end;
 exec_({sub,Arg},Pc,Cnd,M) ->
-    next(Pc+1,Cnd,M#mc{acc=int(M#mc.acc - rd(Arg,M))});
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{S,M1} -> nextc(Pc+1,Cnd,M1#mc{acc=int(M1#mc.acc - S)})
+    end;
 exec_({mul,Arg},Pc,Cnd,M) ->
-    next(Pc+1,Cnd,M#mc{acc=int(M#mc.acc * rd(Arg,M))});
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{S,M1} -> nextc(Pc+1,Cnd,M1#mc{acc=int(M1#mc.acc * S)})
+    end;
 exec_('not',Pc,Cnd,M) ->
     Acc1 = if M#mc.acc =:= 0 -> 100; true -> 0 end,
     next(Pc+1,Cnd,M#mc{acc=Acc1});
 exec_({dgt,Arg},Pc,Cnd,M) ->
-    %% 1. what about negative Acc? 
-    %% 2. What if Pos is < 0 or > 2?
-    Pos = rd(Arg,M),
-    A = digit(Pos,M#mc.acc),
-    next(Pc+1,Cnd,M#mc{acc=A});
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{Pos,M1} ->
+	    A = digit(Pos,M1#mc.acc),
+	    nextc(Pc+1,Cnd,M1#mc{acc=A})
+    end;
 exec_({dst,Arg,Dgt},Pc,Cnd,M) ->
-    %% 1. What if Dgt < 0 or Dgt > 9 ?
-    D = rd(Dgt,M) rem 10,
-    Pos = rd(Arg,M),
-    P10 = pow10(Pos),
-    A0 = digit(Pos,M#mc.acc)*P10,
-    A = if M#mc.acc < 0 ->
-		(M#mc.acc + A0) - D*P10;
-	   true ->
-		(M#mc.acc - A0) + D*P10
-	end,
-    next(Pc+1,Cnd,M#mc{acc=A});
-exec_({teq,Src1,Src2},Pc,_Cnd,M) ->
-    A = rd(Src1,M),
-    B = rd(Src2,M),
-    if A =:= B -> next(Pc+1,1,M);
-       true -> next(Pc+1,-1,M)
+    case rd(Arg,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{Pos,M1} ->
+	    case rd(Dgt,2,M1) of
+		{block,M2} -> block(Pc,Cnd,M2);
+		{D0,M2} ->
+		    D = D0 rem 10,
+		    P10 = pow10(Pos),
+		    A0 = digit(Pos,M2#mc.acc)*P10,
+		    A = if M2#mc.acc < 0 ->
+				(M2#mc.acc + A0) - D*P10;
+			   true ->
+				(M2#mc.acc - A0) + D*P10
+			end,
+		    nextc(Pc+1,Cnd,M2#mc{acc=A})
+	    end
     end;
-exec_({tgt,Src1,Src2},Pc,_Cnd,M) ->
-    A = rd(Src1,M),
-    B = rd(Src2,M),
-    if A > B -> next(Pc+1,1,M);
-       true -> next(Pc+1,-1,M)
+exec_({teq,Src1,Src2},Pc,Cnd,M) ->
+    case rd(Src1,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{A,M1} ->
+	    case rd(Src2,2,M1) of
+		{block,M2} -> block(Pc,Cnd,M2);
+		{B,M2} ->
+		    if A =:= B -> nextc(Pc+1,1,M2);
+		       true -> nextc(Pc+1,-1,M2)
+		    end
+	    end
     end;
-exec_({tlt,Src1,Src2},Pc,_Cnd,M) ->
-    A = rd(Src1,M),
-    B = rd(Src2,M),
-    if A < B -> next(Pc+1,1,M);
-       true -> next(Pc+1,-1,M)
+exec_({tgt,Src1,Src2},Pc,Cnd,M) ->
+    case rd(Src1,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{A,M1} ->
+	    case rd(Src2,2,M1) of
+		{block,M2} -> block(Pc,Cnd,M2);
+		{B,M2} ->
+		    if A > B -> nextc(Pc+1,1,M2);
+		       true -> nextc(Pc+1,-1,M2)
+		    end
+	    end
     end;
-exec_({tcp,Src1,Src2},Pc,_Cnd,M) ->
-    A = rd(Src1,M),
-    B = rd(Src2,M),
-    if A > B -> next(Pc+1,1,M);
-       A < B -> next(Pc+1,-1,M);
-       true -> next(Pc+1,0,M)
+exec_({tlt,Src1,Src2},Pc,Cnd,M) ->
+    case rd(Src1,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{A,M1} ->
+	    case rd(Src2,2,M1) of
+		{block,M2} -> block(Pc,Cnd,M2);
+		{B,M2} ->
+		    if A < B -> nextc(Pc+1,1,M2);
+		       true -> nextc(Pc+1,-1,M2)
+		    end
+	    end
+    end;
+exec_({tcp,Src1,Src2},Pc,Cnd,M) ->
+    case rd(Src1,1,M) of
+	{block,M1} -> block(Pc,Cnd,M1);
+	{A,M1} ->
+	    case rd(Src2,2,M1) of
+		{block,M2} -> block(Pc,Cnd,M2);
+		{B,M2} ->
+		    if A > B -> nextc(Pc+1,1,M2);
+		       A < B -> nextc(Pc+1,-1,M2);
+		       true -> nextc(Pc+1,0,M2)
+		    end
+	    end
     end.
+
+nextc(Pc,Cnd,M) -> %% clear rd cache (commit)
+    next(Pc,Cnd,M#mc { rd=?EMPTY }).
 
 next(Pc,Cnd,M) when Pc > tuple_size(M#mc.prog) ->
     exec(element(1,M#mc.prog),1,Cnd,M);
 next(Pc,Cnd,M) ->
     exec(element(Pc,M#mc.prog),Pc,Cnd,M).
 
-sleep(Cycles,M) -> 
-    M#mc { cycle = M#mc.cycle + Cycles }.
+block(Pc,Cnd,M) ->
+    M#mc { state=slp, pc=Pc, cnd=Cnd, cycle=M#mc.cycle+1 }.
 
-wait(Port,M) ->
-    Cycles = wire:wait({M#mc.id,Port}),
-    M#mc { cycle = M#mc.cycle + Cycles }.
-    
-rd(acc,M) -> M#mc.acc;
-rd(null,_M) -> 0;
-rd(I,_M) when is_integer(I) -> I;
-%% fixme ports and pins
-rd(p0,M) -> wire:read({M#mc.id,p0});
-rd(p1,M) -> wire:read({M#mc.id,p1});
-rd(x0,M) -> wire:read({M#mc.id,x0});
-rd(x1,M) -> wire:read({M#mc.id,x1}).
+sleep(Pc,Cnd,M,Cycles) ->
+    M#mc { state=slp, pc=Pc+1, cnd=Cnd, rd=?EMPTY, cycle=M#mc.cycle+Cycles }.
+
+rd(acc,_Q,M)  -> {M#mc.acc,M};
+rd(null,_Q,M) -> {0,M};
+rd(I,_Q,M) when is_integer(I) -> {I,M};
+rd(P={p,_},_Q,M) -> {wire:read({M#mc.id,P}),M};
+rd(X={x,_},Q,M) -> xrd({M#mc.id,X},Q,M).
+
+xrd(XPin,Q,M) ->
+    case element(Q,M#mc.rd) of
+	undefined ->
+	    case wire:read(XPin) of
+		block -> {block,M};
+		V -> {V,M#mc { rd=setelement(Q,M#mc.rd,V) }}
+	    end;
+	V -> {V,M}
+    end.
 
 wr(S,acc,M) -> M#mc { acc=S };
 wr(_S,null,M) -> M;
-wr(S,p0,M) -> wire:write({M#mc.id,p0},S);
-wr(S,p1,M) -> wire:write({M#mc.id,p1},S);
-wr(S,x0,M) -> wire:write({M#mc.id,x0},S);
-wr(S,x1,M) -> wire:write({M#mc.id,x1},S);
+wr(S,P={p,_},M) -> wire:write({M#mc.id,P},S), M;
+wr(S,X={x,_},M) -> xwr(S,{M#mc.id,X},M);
 wr(_S,_,M) -> M.
+
+xwr(S,XPin,M) ->
+    case wire:write(XPin,S) of
+	block -> block;
+	ok -> M
+    end.
 
 digit(0,Value) -> abs(Value) rem 10;
 digit(1,Value) -> (abs(Value) div 10) rem 10;

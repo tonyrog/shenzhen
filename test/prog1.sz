@@ -1,0 +1,5 @@
+# shenzhen program
+
+start:
+	add 1
+	sub 1

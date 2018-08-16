@@ -1,0 +1,28 @@
+# meta program
+
+# max(A,B) -> acc
+max:
+	tcp p0 p1
+	+mov p0 acc
+	-mov p1 acc
+
+# min(A,B) -> acc
+min:
+	tcp p0 p1
+	-mov p0 acc	
+	+mov p1 acc
+
+# A <= B  -> cond
+lte:
+       tlt p0 p1
+       -teq p0 p1
+
+# abs(acc) -> acc
+abs:
+       tlt acc 0   # A < 0
+       +mul -1
+
+# neg(acc) -> acc
+neg:
+	mul -1
+

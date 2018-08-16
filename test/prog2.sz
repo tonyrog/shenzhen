@@ -1,0 +1,9 @@
+# shenzhen program
+
+start:
+	slp x0
+	mov x0 acc
+loop:	tgt acc 100
+	-add p0
+	-jmp loop
+	mov acc x1
