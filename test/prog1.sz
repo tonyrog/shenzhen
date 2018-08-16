@@ -1,5 +1,8 @@
 # shenzhen program
 
+# declare program for cpu 1 type = mc4000
+[mc4000 1]
 start:
 	add 1
 	sub 1
+;

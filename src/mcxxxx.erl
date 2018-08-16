@@ -11,6 +11,9 @@
 -export([parse/1]).
 -export([load/1]).
 
+%% debug
+-export([scan_line/2]).
+
 compile(XXXX,Is) ->
     Ls = enumerate_labels(Is),
     compile_(XXXX,Is,Ls,[]).
@@ -155,6 +158,10 @@ parse_lines([Text|Ls], Ln, Acc) ->
 parse_lines([],_Ln,Acc) ->
     {ok,lists:reverse(Acc)}.
 
+parse_line([{directive,{prog,Type,ID}}],_Ln) ->
+    {ok,{prog,Type,ID}};
+parse_line([{directive,Dir}],_Ln) ->
+    {ok, {directive,Dir}};
 parse_line(['+',Op|As],Ln) when is_atom(Op) ->
     case parse_args(As,Ln) of
 	{ok,As1} ->
@@ -176,7 +183,9 @@ parse_line([Op|As],Ln) when is_atom(Op) ->
 parse_line(As,Ln) ->
     {error, {parse_error,Ln,As}}.
 
-parse_labels([L={label,_}|Ts], Acc) ->
+parse_labels([{string,Label},{label,[]}|Ts], Acc) -> %% foo :
+    parse_labels(Ts, [{label,Label}|Acc]);
+parse_labels([L={label,_}|Ts], Acc) ->  %% foo:
     parse_labels(Ts, [L|Acc]);
 parse_labels(Ts,Acc) ->
     {Acc,Ts}.
@@ -196,9 +205,39 @@ parse_args(_,_Ln,_Acc) ->
     {error,badarg}.
 
 scan_line(Text, Ln) ->
-    Text1 = strip_comment(Text),
-    scan_parts(string:tokens(Text1, " \t"),Ln,[]).
+    Text1 = string:trim(strip_comment(Text)),
+    case Text1 of
+	[$[|Text2] ->
+	    case lists:reverse(Text2) of
+		[$] | Text3] -> scan_dir(tokens(lists:reverse(Text3)));
+		_ -> scan_dir(tokens(Text2))
+	    end;
+	_ ->
+	    scan_parts(tokens(Text1),Ln,[])
+    end.
 
+tokens(Text) ->
+    string:tokens(Text, " \t").
+
+scan_dir(["mc4000", ID]) ->
+    {ok,[{directive,{prog,mc4000,ID}}]};
+scan_dir(["mc6000", ID]) ->
+    {ok,[{directive,{prog,mc6000,ID}}]};
+scan_dir(["connect",ID1,Reg1,ID2,Reg2]) ->
+    R1 = case scan_register(Reg1) of
+	     false -> Reg1;
+	     SR1 -> SR1
+	 end,
+    R2 = case scan_register(Reg2) of
+	     false -> Reg2;
+	     SR2 -> SR2
+	 end,
+    {ok,[{directive,{connect,ID1,R1,ID2,R2}}]};
+scan_dir(_) ->
+    {error, unknown_directive}.
+
+scan_parts([";"|Ps],Ln,Acc) ->
+    scan_parts(Ps,Ln,[end_prog|Acc]);
 scan_parts([Part|Ps],Ln,Acc) ->
     case scan_integer(Part) of
 	false ->
@@ -207,7 +246,8 @@ scan_parts([Part|Ps],Ln,Acc) ->
 		    case scan_register(Part) of
 			false ->
 			    case scan_label(Part) of
-				false -> scan_parts(Ps,Ln,[{string,Part}|Acc]);
+				false ->
+				    scan_parts(Ps,Ln,[{string,Part}|Acc]);
 				L -> scan_parts(Ps,Ln,[{label,L}|Acc])
 			    end;
 			R -> scan_parts(Ps,Ln,[{register,R}|Acc])

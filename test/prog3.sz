@@ -1,28 +1,33 @@
 # meta program
 
-# max(A,B) -> acc
-max:
-	tcp p0 p1
-	+mov p0 acc
-	-mov p1 acc
+# max(A B) -> acc
+max(A B):
+	tcp A B
+	+mov A acc
+	-mov B acc
+;
 
-# min(A,B) -> acc
-min:
-	tcp p0 p1
-	-mov p0 acc	
-	+mov p1 acc
-
+# min(A B) -> acc
+min(A B):
+	tcp A B
+	-mov A acc	
+	+mov B acc
+;
 # A <= B  -> cond
-lte:
-       tlt p0 p1
-       -teq p0 p1
+tlte(A B):
+       tlt A B
+       -teq A B
+;
 
 # abs(acc) -> acc
-abs:
-       tlt acc 0   # A < 0
+abs(A):
+       tlt A 0   # A < 0
+       +mov A acc # fixme: macro check if A == acc already
        +mul -1
-
+;
 # neg(acc) -> acc
-neg:
+neg(A):
+       +mov A acc # fixme: macro check if A == acc already
 	mul -1
+;
 

@@ -1,9 +1,26 @@
 # shenzhen program
 
+# declare program for cpu 1 type = mc4000
+# declare program for cpu 2 type = mc4000
+[mc4000 1]
+[mc4000 2]
 start:
-	slp x0
-	mov x0 acc
-loop:	tgt acc 100
-	-add p0
-	-jmp loop
+	mov p0 acc
+	tgt acc 100
+	+mov 100 acc
+	tlt acc 0
+	+mov 0 acc
 	mov acc x1
+;
+
+[mc4000 3]
+	slx x0
+	add x0
+	slx x1
+	add x1
+;
+
+[connect 1 x1 3 x0]
+[connect 2 x1 3 x1]
+
+
