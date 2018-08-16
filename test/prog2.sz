@@ -1,26 +1,40 @@
 # shenzhen program
 
+macro min(A B) {
+      tlt A B
+      +mov A acc
+      -mov B acc
+}
+
+macro max(A B) {
+      tgt A B
+      +mov A acc
+      -mov B acc
+}
+
+macro range(A Min Max) {
+      max(A Min)
+      min(acc Max)
+}
+
 # declare program for cpu 1 type = mc4000
 # declare program for cpu 2 type = mc4000
-[mc4000 1]
-[mc4000 2]
-start:
-	mov p0 acc
-	tgt acc 100
-	+mov 100 acc
-	tlt acc 0
-	+mov 0 acc
+[mc6000 1]
+[mc6000 2]
+code {
+	range(p0, 0, 100)
+	mov acc x0	
+	range(p1, 0, 100)
 	mov acc x1
-;
+}
 
 [mc4000 3]
+code {
 	slx x0
 	add x0
 	slx x1
 	add x1
-;
+}
 
 [connect 1 x1 3 x0]
 [connect 2 x1 3 x1]
-
-

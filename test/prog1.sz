@@ -2,7 +2,11 @@
 
 # declare program for cpu 1 type = mc4000
 [mc4000 1]
+code {
 start:
 	add 1
 	sub 1
-;
+	teq acc 5
+	+jmp start
+	-mul 3
+}

@@ -7,37 +7,68 @@
 
 -module(mcxxxx).
 
--export([compile/2]).
+-export([compile/1]).
 -export([parse/1]).
 -export([load/1]).
+-export([scan/1]).
 
-%% debug
--export([scan_line/2]).
 
-compile(XXXX,Is) ->
-    Ls = enumerate_labels(Is),
-    compile_(XXXX,Is,Ls,[]).
+compile(Code) ->
+    compile(Code, [], [], []).
 
-compile_(XXXX,[{label,_}|Is],Ls,Acc) ->
-    compile_(XXXX,Is,Ls,Acc);
-compile_(XXXX,[{'+',Op}|Is],Ls,Acc) ->
-    case compile_op(XXXX,Op,Ls) of
-	{ok,Op1} -> compile_(XXXX,Is,Ls,[{1,Op1}|Acc]);
+compile([{{macro,Name,Args},Macro}|Code],Progs,Macros,Acc) ->
+    compile(Code, Progs, [{Name,Args,Macro}|Macros], Acc);
+compile([{prog,Type,ID}|Code],Progs,Macros,Acc) ->
+    compile(Code, [{Type,ID}|Progs],Macros,Acc);
+compile([{code,Prog}|Code],Progs,Macros,Acc) ->
+    Type = prog_type(Progs, undefined),
+    case compile_prog(Type,Prog,Macros) of
+	{ok,Compiled} ->
+	    compile(Code, [], Macros, [{Progs,Compiled}|Acc]);
+	Error ->
+	    Error
+    end;
+compile([{directive,D}|Code],Progs,Macros,Acc) ->
+    compile(Code, Progs, Macros, [{directive,D}|Acc]);
+compile([],_Progs,_Macros,Acc) ->
+    {ok, lists:reverse(Acc)}.
+
+prog_type([{mc4000,_}|_Ts], _) -> mc4000;
+prog_type([{mc6000,_}|_Ts], mc4000) -> mc4000;
+prog_type([{mc6000,_}|Ts], undefined) -> prog_type(Ts, mc6000);
+prog_type([{mc6000,_}|Ts], mc6000) -> prog_type(Ts, mc6000);
+prog_type([], undefined) -> mc4000;
+prog_type([], Type) -> Type.
+
+compile_prog(Type,Prog, Macros) ->
+    case expand_macros(Prog, Macros, []) of
+	{ok,Prog1} ->
+	    Ls = enumerate_labels(Prog1),
+	    compile_(Type,Prog1,Ls,[]);
+	Error ->
+	    Error
+    end.
+
+compile_(Type,[{label,_}|Is],Ls,Acc) ->
+    compile_(Type,Is,Ls,Acc);
+compile_(Type,[{'+',Op}|Is],Ls,Acc) ->
+    case compile_op(Type,Op,Ls) of
+	{ok,Op1} -> compile_(Type,Is,Ls,[{1,Op1}|Acc]);
 	Error -> Error
     end;
-compile_(XXXX,[{'-',Op}|Is],Ls,Acc) ->
-    case compile_op(XXXX,Op,Ls) of
-	{ok,Op1} -> compile_(XXXX,Is,Ls,[{-1,Op1}|Acc]);
+compile_(Type,[{'-',Op}|Is],Ls,Acc) ->
+    case compile_op(Type,Op,Ls) of
+	{ok,Op1} -> compile_(Type,Is,Ls,[{-1,Op1}|Acc]);
 	Error -> Error
     end;
-compile_(XXXX,[Op|Is],Ls,Acc) ->
-    case compile_op(XXXX,Op,Ls) of
-	{ok,Op1} -> compile_(XXXX,Is,Ls,[{0,Op1}|Acc]);
+compile_(Type,[Op|Is],Ls,Acc) ->
+    case compile_op(Type,Op,Ls) of
+	{ok,Op1} -> compile_(Type,Is,Ls,[{0,Op1}|Acc]);
 	Error -> Error
     end;
-compile_(XXXX,[],_Ls,Acc) ->
+compile_(Type,[],_Ls,Acc) ->
     L = length(Acc),
-    {_,N} = XXXX:lrange(),
+    {_,N} = Type:lrange(),
     if L > N ->
 	    {error,program_too_large};
        true ->
@@ -55,72 +86,128 @@ enumerate_labels([_|Is],I,Labels) ->
 enumerate_labels([],_I,Labels) ->
     Labels.
 
-compile_op(XXXX,Op,_Ls) when is_atom(Op) ->
-    case lists:member(Op, XXXX:instructions()) of
+expand_macros([{{call,Name},Args}|Code],Ms,Acc) ->
+    case lists:keyfind(Name, 1, Ms) of
+	false ->
+	    {error,{macro_not_defined,Name}};
+	{_,Formal,Body} ->
+	    case length(Formal) =:= length(Args) of
+		false ->
+		    {error,{macro_arg_mismatch,Name}};
+		true ->
+		    Bound = lists:zip(Formal,Args),
+		    Body1 = set_bindings(Body, Bound),
+		    Body2 = prefix_labels(Body1, erlang:unique_integer()),
+		    expand_macros(Body2++Code, Ms, Acc)
+	    end
+    end;
+expand_macros([A|Code], Ms, Acc) ->
+    expand_macros(Code, Ms, [A|Acc]);
+expand_macros([], _Ms, Acc) ->
+    {ok, lists:reverse(Acc)}.
+
+prefix_labels([{label,L}|Code], Prefix) ->
+    [{label,{Prefix,L}} | prefix_labels(Code, Prefix)];
+prefix_labels([{'+',{jmp,[L]}}|Code], Prefix) ->
+    [{'+',{jmp,[{Prefix,L}]}}  | prefix_labels(Code, Prefix)];
+prefix_labels([{'-',{jmp,[L]}}|Code], Prefix) ->
+    [{'-',{jmp,[{Prefix,L}]}}  | prefix_labels(Code, Prefix)];
+prefix_labels([{jmp,[L]}|Code], Prefix) ->
+    [{jmp,[{Prefix,L}]}  | prefix_labels(Code, Prefix)];
+prefix_labels([A|Code], Prefix) ->
+    [A | prefix_labels(Code, Prefix)];
+prefix_labels([], _Prefix) ->
+    [].
+
+set_bindings([L={label,_}|Code], Bound) ->
+    [L|set_bindings(Code, Bound)];
+set_bindings([{'+',{Op,Args}}|Code], Bound) ->
+    [{'+',{Op,set_args(Args, Bound)}}|set_bindings(Code, Bound)];
+set_bindings([{'-',{Op,Args}}|Code], Bound) ->
+    [{'-',{Op,set_args(Args, Bound)}}|set_bindings(Code, Bound)];
+set_bindings([{Op,Args}|Code], Bound) ->
+    [{Op,set_args(Args, Bound)}|set_bindings(Code, Bound)];
+set_bindings([], _Bound) ->
+    [].
+
+set_args([V|Args], Bound) when is_atom(V) ->
+    case lists:keyfind(V, 1, Bound) of
+	false -> [V|set_args(Args,Bound)];
+	{_,Val} ->[Val | set_args(Args,Bound)]
+    end;
+set_args([A|Args], Bound) ->
+    [A|set_args(Args, Bound)];
+set_args([], _Bound) ->
+    [].
+
+
+compile_op(Type,{Op,[]},_Ls) when is_atom(Op) ->
+    case lists:member(Op, Type:instructions()) of
 	true -> {ok,Op};
 	false -> {error,{unknown_op, Op}}
     end;
-compile_op(XXXX,{Op,Arg},Ls) when is_atom(Op) ->
-    case lists:keyfind(Op,1,XXXX:instructions()) of
+compile_op(Type,{Op,[Arg]},Ls) when is_atom(Op) ->
+    case lists:keyfind(Op,1,Type:instructions()) of
 	false -> {error,{unknown_op,Op}};
 	{Op,Spec} ->
-	    case compile_arg(XXXX,Spec,Arg,Ls) of
+	    case compile_arg(Type,Spec,Arg,Ls) of
 		{ok,A} -> {ok,{Op,A}};
 		Error -> Error
 	    end
     end;
-compile_op(XXXX,{Op,Arg1,Arg2},Ls) when is_atom(Op) ->
-    case lists:keyfind(Op,1,XXXX:instructions()) of
+compile_op(Type,{Op,[Arg1,Arg2]},Ls) when is_atom(Op) ->
+    case lists:keyfind(Op,1,Type:instructions()) of
 	false -> {error,{unknown_op,Op}};
 	{Op,Spec1,Spec2} ->
-	    case compile_arg(XXXX,Spec1,Arg1,Ls) of
+	    case compile_arg(Type,Spec1,Arg1,Ls) of
 		{ok,A1} ->
-		    case compile_arg(XXXX,Spec2,Arg2,Ls) of
+		    case compile_arg(Type,Spec2,Arg2,Ls) of
 			{ok,A2} -> {ok,{Op,A1,A2}};
 			Error -> Error
 		    end;
 		Error -> Error
 	    end
     end;
-compile_op(_XXXX,Op,_Ls) ->
+compile_op(_Type,Op,_Ls) ->
     {error,{unknown_op,Op}}.
 
 
-compile_arg(XXXX,r,Arg,_Ls) ->
-    case lists:member(Arg, XXXX:registers()++XXXX:pins()++XXXX:ports()) of
+compile_arg(Type,r,Arg,_Ls) ->
+    case lists:member(Arg, Type:registers()++Type:pins()++Type:ports()) of
 	true  -> {ok,Arg};
 	false -> {error,{badarg,Arg}}
     end;
-compile_arg(XXXX,p,Arg,_Ls) ->
-    case lists:member(Arg, XXXX:ports()) of
+compile_arg(Type,p,Arg,_Ls) ->
+    case lists:member(Arg, Type:ports()) of
 	true -> {ok,Arg};
 	false -> {error,{badarg,Arg}}
     end;
-compile_arg(_XXXX,i,Arg,_Ls) ->
+compile_arg(_Type,i,Arg,_Ls) ->
     if is_integer(Arg), Arg >= -999, Arg =< 999 -> 
 	    {ok,Arg};
        true -> {error,{badarg,Arg}}
     end;
-compile_arg(XXXX,l,Arg,_Ls) when is_integer(Arg) ->
-    {L0,L1} = XXXX:lrange(),
+compile_arg(Type,l,Arg,_Ls) when is_integer(Arg) ->
+    {L0,L1} = Type:lrange(),
     if Arg >= L0, Arg =< L1 -> {ok,Arg};
        true -> {error,{label_overflow,Arg}}
     end;
-compile_arg(XXXX,l,Arg,Ls) when is_list(Arg) ->
+compile_arg(Type,l,Arg,Ls) ->
     case lists:keyfind(Arg, 1, Ls) of
 	false -> {error,{label_not_found,Arg}};
 	{_,L} ->
-	    {L0,L1} = XXXX:lrange(),
+	    {L0,L1} = Type:lrange(),
 	    if L >= L0, L =< L1 -> {ok,L};
 	       true -> {error,{label_overflow,L}}
 	    end
     end;
-compile_arg(XXXX,[T|Ts],Arg,Ls) ->
-    case compile_arg(XXXX,T,Arg,Ls) of
+compile_arg(Type,[T|Ts],Arg,Ls) ->
+    case compile_arg(Type,T,Arg,Ls) of
 	{ok,A} -> {ok,A};
-	_Error -> compile_arg(XXXX,Ts,Arg,Ls)
+	{error,{badarg,_}} -> compile_arg(Type,Ts,Arg,Ls);
+	Error -> Error
     end;
-compile_arg(_XXXX,[],Arg,_Ls) ->
+compile_arg(_Type,[],Arg,_Ls) ->
     {error,{badarg,Arg}}.
 
 %% load and parse
@@ -134,182 +221,100 @@ load(File) ->
 
 %% parse text code into internal form 
 parse(Text) ->
-    parse_lines(string:tokens(Text, "\n"),1,[]).
-
-parse_lines([Text|Ls], Ln, Acc) ->
-    case scan_line(Text, Ln) of
-	{ok,[]} -> %% empty line
-	    parse_lines(Ls,Ln+1,Acc);
-	{ok,Ts} ->
-	    case parse_labels(Ts, Acc) of
-		{Acc1,[]} ->
-		    parse_lines(Ls,Ln+1,Acc1);
-		{Acc1,Ts1} ->
-		    case parse_line(Ts1, Ln) of
-			{ok,Instr} ->
-			    parse_lines(Ls,Ln+1,[Instr|Acc1]);
-			Error ->
-			    Error
-		    end
-	    end;
-	Error ->
-	    Error
-    end;
-parse_lines([],_Ln,Acc) ->
-    {ok,lists:reverse(Acc)}.
-
-parse_line([{directive,{prog,Type,ID}}],_Ln) ->
-    {ok,{prog,Type,ID}};
-parse_line([{directive,Dir}],_Ln) ->
-    {ok, {directive,Dir}};
-parse_line(['+',Op|As],Ln) when is_atom(Op) ->
-    case parse_args(As,Ln) of
-	{ok,As1} ->
-	    {ok, {'+', list_to_tuple([Op|As1])}};
+    case scan(Text) of
+	{ok,Ts} -> parse_file(Ts,[]);
 	Error -> Error
-    end;
-parse_line(['-',Op|As],Ln) when is_atom(Op) ->
-    case parse_args(As,Ln) of
-	{ok,As1} ->
-	    {ok, {'-', list_to_tuple([Op|As1])}};
-	Error -> Error
-    end;
-parse_line([Op|As],Ln) when is_atom(Op) ->
-    case parse_args(As,Ln) of
-	{ok,As1} ->
-	    {ok, list_to_tuple([Op|As1])};
-	Error -> Error
-    end;
-parse_line(As,Ln) ->
-    {error, {parse_error,Ln,As}}.
-
-parse_labels([{string,Label},{label,[]}|Ts], Acc) -> %% foo :
-    parse_labels(Ts, [{label,Label}|Acc]);
-parse_labels([L={label,_}|Ts], Acc) ->  %% foo:
-    parse_labels(Ts, [L|Acc]);
-parse_labels(Ts,Acc) ->
-    {Acc,Ts}.
-
-
-parse_args(As,Ln) -> parse_args(As,Ln,[]).
-
-parse_args([{register,R}|As], Ln, Acc) ->
-    parse_args(As, Ln, [R|Acc]);
-parse_args([{integer,I}|As], Ln, Acc) ->
-    parse_args(As, Ln, [I|Acc]);
-parse_args([{string,L}|As], Ln, Acc) ->
-    parse_args(As, Ln, [L|Acc]);
-parse_args([],_Ln,Acc) ->
-    {ok,lists:reverse(Acc)};
-parse_args(_,_Ln,_Acc) ->
-    {error,badarg}.
-
-scan_line(Text, Ln) ->
-    Text1 = string:trim(strip_comment(Text)),
-    case Text1 of
-	[$[|Text2] ->
-	    case lists:reverse(Text2) of
-		[$] | Text3] -> scan_dir(tokens(lists:reverse(Text3)));
-		_ -> scan_dir(tokens(Text2))
-	    end;
-	_ ->
-	    scan_parts(tokens(Text1),Ln,[])
     end.
 
-tokens(Text) ->
-    string:tokens(Text, " \t").
+parse_file([{'[',_},{atom,_,Type},T,{']',_}|Ts], Acc) ->
+    ID = erl_parse:normalise(T),
+    parse_file(Ts, [{prog,Type,ID}|Acc]);
+parse_file([{'[',_},{atom,_,connect},T1,P1,T2,P2,{']',_}|Ts], Acc) ->
+    ID1 = erl_parse:normalise(T1),
+    PIN1 = pin(P1),
+    ID2 = erl_parse:normalise(T2),
+    PIN2 = pin(P2),
+    parse_file(Ts, [{directive,{connect,ID1,PIN1,ID2,PIN2}}|Acc]);
+parse_file([{atom,_,code},{'{',_}|Ts], Acc) ->
+    parse_code(code, '', Ts, [], Acc);
+parse_file([{atom,_,macro},{var,_,Name},{'(',_}|Ts], Acc) ->
+    parse_macro(Name, Ts, [], Acc);
+parse_file([{atom,_,macro},{atom,_,Name},{'(',_}|Ts], Acc) ->
+    parse_macro(Name, Ts, [], Acc);
+parse_file([], Acc) ->
+    {ok, lists:reverse(Acc)}.
 
-scan_dir(["mc4000", ID]) ->
-    {ok,[{directive,{prog,mc4000,ID}}]};
-scan_dir(["mc6000", ID]) ->
-    {ok,[{directive,{prog,mc6000,ID}}]};
-scan_dir(["connect",ID1,Reg1,ID2,Reg2]) ->
-    R1 = case scan_register(Reg1) of
-	     false -> Reg1;
-	     SR1 -> SR1
-	 end,
-    R2 = case scan_register(Reg2) of
-	     false -> Reg2;
-	     SR2 -> SR2
-	 end,
-    {ok,[{directive,{connect,ID1,R1,ID2,R2}}]};
-scan_dir(_) ->
-    {error, unknown_directive}.
+parse_macro(Name, [{var,_,V}|Ts], Args, Acc) ->
+    parse_macro(Name, Ts, [V|Args], Acc);
+parse_macro(Name, [{',',_}|Ts], Args, Acc) ->
+    parse_macro(Name, Ts, Args, Acc);
+parse_macro(Name, [{')',_},{'{',_}|Ts], Args, Acc) ->
+    parse_code({macro,Name,lists:reverse(Args)}, '', Ts, [], Acc);
+parse_macro(Name, _, _Args, _Acc) ->
+    {error, {macro_variable_expected,Name}}.
 
-scan_parts([";"|Ps],Ln,Acc) ->
-    scan_parts(Ps,Ln,[end_prog|Acc]);
-scan_parts([Part|Ps],Ln,Acc) ->
-    case scan_integer(Part) of
-	false ->
-	    case scan_instruction(Part) of
-		false ->
-		    case scan_register(Part) of
-			false ->
-			    case scan_label(Part) of
-				false ->
-				    scan_parts(Ps,Ln,[{string,Part}|Acc]);
-				L -> scan_parts(Ps,Ln,[{label,L}|Acc])
-			    end;
-			R -> scan_parts(Ps,Ln,[{register,R}|Acc])
-		    end;
-		[Cnd,Op] -> scan_parts(Ps,Ln,[Op,Cnd|Acc]);
-		Op -> scan_parts(Ps,Ln,[Op|Acc])
-	    end;
-	Int -> scan_parts(Ps,Ln,[{integer,Int}|Acc])
-    end;
-scan_parts([],_Ln,Acc) ->
-    Acc1 = lists:reverse(Acc),
-    {ok,Acc1}.
+parse_code(What, _Pref, [{atom,Ln,Name},{':',Ln}|Ts], Code, Acc) ->
+    parse_code(What, '', Ts, [{label,Name}|Code], Acc);
+parse_code(What, _Pref, [{'+',_}|Ts], Code, Acc) ->
+    parse_code(What, '+', Ts, Code, Acc);
+parse_code(What, _Pref, [{'-',_}|Ts], Code, Acc) ->
+    parse_code(What, '-', Ts, Code, Acc);
 
-scan_integer(Text) ->
-    try list_to_integer(Text) of
-	Int -> Int
-    catch
-	error:_ -> false
+parse_code(What, Pref, [{atom,Ln,Name},{'(',Ln}|Ts], Code, Acc) ->
+    {Args,Ts2} = parse_args(Ln,Ts,[]),
+    parse_code(What, '', Ts2, [prefix(Pref,{{call,Name},Args})|Code], Acc);
+parse_code(What, Pref, [{var,Ln,Name},{'(',Ln}|Ts], Code, Acc) ->
+    {Args,Ts2} = parse_args(Ln,Ts,[]),
+    parse_code(What, '', Ts2, [prefix(Pref,{{call,Name},Args})|Code], Acc);
+parse_code(What, Pref, [{atom,Ln,Op}|Ts], Code, Acc) ->
+    {Args,Ts1} = parse_args(Ln,Ts,[]),
+    parse_code(What, '', Ts1, [prefix(Pref,{Op,Args})|Code], Acc);
+parse_code(What, _Pref, [{'}',_}|Ts], Code, Acc) ->
+    parse_file(Ts, [{What, lists:reverse(Code)}|Acc]);
+parse_code(What, _Pref, [], Code, Acc) ->
+    parse_file([], [{What, lists:reverse(Code)}|Acc]).
+
+prefix('+', Op) -> {'+', Op};
+prefix('-', Op) -> {'-', Op};
+prefix('', Op) -> Op.
+
+parse_args(Ln, [{atom,Ln,acc}|Ts], Acc) -> parse_args(Ln, Ts, [acc|Acc]);
+parse_args(Ln, [{atom,Ln,dat}|Ts], Acc) -> parse_args(Ln, Ts, [dat|Acc]);
+parse_args(Ln, [{atom,Ln,null}|Ts], Acc) -> parse_args(Ln, Ts, [null|Acc]);
+parse_args(Ln, [{atom,Ln,x0}|Ts], Acc) -> parse_args(Ln, Ts, [{x,0}|Acc]);
+parse_args(Ln, [{atom,Ln,x1}|Ts], Acc) -> parse_args(Ln, Ts, [{x,1}|Acc]);
+parse_args(Ln, [{atom,Ln,x2}|Ts], Acc) -> parse_args(Ln, Ts, [{x,2}|Acc]);
+parse_args(Ln, [{atom,Ln,x3}|Ts], Acc) -> parse_args(Ln, Ts, [{x,3}|Acc]);
+parse_args(Ln, [{atom,Ln,p0}|Ts], Acc) -> parse_args(Ln, Ts, [{p,0}|Acc]);
+parse_args(Ln, [{atom,Ln,p1}|Ts], Acc) -> parse_args(Ln, Ts, [{p,1}|Acc]);
+parse_args(Ln, [{atom,Ln,A}|Ts], Acc) -> parse_args(Ln, Ts, [A|Acc]);
+parse_args(Ln, [{var,Ln,A}|Ts], Acc) -> parse_args(Ln, Ts, [A|Acc]);
+parse_args(Ln, [{'-',_},{integer,Ln,X}|Ts], Acc) -> parse_args(Ln,Ts,[-X|Acc]);
+parse_args(Ln, [{integer,Ln,X}|Ts], Acc) -> parse_args(Ln,Ts,[X|Acc]);
+parse_args(Ln, [{',',Ln}|Ts], Acc) -> parse_args(Ln, Ts, Acc);
+parse_args(Ln, [{')',Ln}|Ts], Acc) -> {lists:reverse(Acc), Ts};
+parse_args(Ln, [{';',Ln}|Ts], Acc) -> {lists:reverse(Acc), Ts};
+parse_args(Ln, Ts=[{_,Ln1}|_], Acc) 
+  when Ln =/= Ln1 -> {lists:reverse(Acc), Ts};
+parse_args(Ln, Ts=[{_,Ln1,_}|_], Acc) 
+  when Ln =/= Ln1 -> {lists:reverse(Acc), Ts};
+parse_args(_Ln, Ts=[{'}',_}|_], Acc) -> {lists:reverse(Acc), Ts};
+parse_args(_Ln, [], Acc) -> {lists:reverse(Acc), []}.
+
+pin({atom,_,p0}) -> {p,0};
+pin({atom,_,p1}) -> {p,1};
+pin({atom,_,x0}) -> {x,0};
+pin({atom,_,x1}) -> {x,1};
+pin({atom,_,x2}) -> {x,2};
+pin({atom,_,x3}) -> {x,3}.
+
+scan(Text) ->
+    Text1 = remove_comments(Text),
+    case erl_scan:string(Text1) of
+	{ok,Ts,_Ln} -> {ok,Ts};
+	Error = {error,_} -> Error
     end.
 
-scan_register("acc") -> acc;
-scan_register("dat") -> dat;
-scan_register("null") -> null;
-scan_register([$x,I]) when I>=$0, I=<$9 -> {x,I-$0};
-scan_register([$p,I]) when I>=$0, I=<$9 -> {p,I-$0};
-scan_register(_) -> false.
-    
-scan_label(Text) ->
-    case lists:reverse(Text) of
-	[$:|RText] -> lists:reverse(RText);
-	_ -> false
-    end.
-
-scan_instruction([$+|Text]) ->
-    case scan_instruction(Text) of
-	false -> false;
-	Instr -> ['+',Instr]
-    end;
-scan_instruction([$-|Text]) ->
-    case scan_instruction(Text) of
-	false -> false;
-	Instr -> ['-',Instr]
-    end;
-scan_instruction("nop") -> nop;
-scan_instruction("mov") -> mov;
-scan_instruction("jmp") -> jmp;
-scan_instruction("slp") -> slp;
-scan_instruction("slx") -> slx;
-scan_instruction("add") -> add;
-scan_instruction("sub") -> sub;
-scan_instruction("mul") -> mul;
-scan_instruction("not") -> 'not';
-scan_instruction("dgt") -> dgt;
-scan_instruction("dst") -> dst;
-scan_instruction("teq") -> teq;
-scan_instruction("tgt") -> tgt;
-scan_instruction("tlt") -> tlt;
-scan_instruction("tcp") -> tcp;
-scan_instruction(_) -> false.
-
-strip_comment(Text) ->
-    case string:chr(Text, $#) of
-	0 -> Text;
-	I -> string:substr(Text,1,I-1)
-    end.
+%% remove # comments
+remove_comments(Text) ->
+    string:join(re:split(Text, "#.*\n",[{return,list}]), "\n").
